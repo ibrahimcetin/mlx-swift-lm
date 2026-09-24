@@ -2,6 +2,10 @@ import Foundation
 import MLXLMCommon
 import Testing
 
+extension Tag {
+    @Tag static var toolParser: Self
+}
+
 struct ToolTests {
     private func toolSchemas(_ names: String...) -> [[String: any Sendable]] {
         names.map { name in
@@ -1757,7 +1761,7 @@ struct ToolTests {
     }
 }
 
-@Suite
+@Suite(.tags(.toolParser))
 struct MiniCPM5ToolCallParserTests {
     @Test("Test MiniCPM5 Tool Call Parser")
     func testMiniCPM5Parser() throws {
