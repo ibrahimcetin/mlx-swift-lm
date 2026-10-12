@@ -53,6 +53,9 @@ public protocol KVCache: Evaluatable {
     /// get the maximum size (if any)
     var maxSize: Int? { get }
 
+    /// Number of historical positions this cache no longer retains.
+    var evictedTokenCount: Int { get }
+
     /// update the cache with new keys and values and return all keys/values
     func update(keys: MLXArray, values: MLXArray) -> (MLXArray, MLXArray)
 
@@ -107,6 +110,8 @@ extension KVCache {
     public var ropeOffset: RoPEOffset {
         .scalar(offset)
     }
+
+    public var evictedTokenCount: Int { 0 }
 
     public func isTrimmable(after positions: Int) -> Bool {
         isTrimmable
@@ -201,6 +206,7 @@ public protocol KVCacheAttentionProtocol: KVCache {
 open class BaseKVCache: KVCache {
     public var offset: Int = 0
     public var maxSize: Int? { nil }
+    open var evictedTokenCount: Int { 0 }
 
     /// RoPE offset for this cache. `open` so subclasses can return a non-scalar
     /// offset (e.g. a batched cache's per-row `.batch(...)`).
@@ -586,6 +592,11 @@ public class RotatingKVCache: BaseKVCache, CustomDebugStringConvertible {
     package var preservedPrefixTokens: Int { keep }
 
     public override var maxSize: Int? { maxCacheSize }
+
+    public override var evictedTokenCount: Int {
+        let retained = wrapped ? (keys?.dim(2) ?? 0) : idx
+        return Swift.max(0, offset - retained)
+    }
 
     /// Number of leading tokens that are never rotated out of the window.
     var keepCount: Int { keep }
@@ -1650,6 +1661,10 @@ public class CacheList: BaseKVCache {
         caches.flatMap { $0.innerState() }
     }
 
+    public override var evictedTokenCount: Int {
+        caches.map(\.evictedTokenCount).max() ?? 0
+    }
+
     public subscript(index: Int) -> KVCache {
         return caches[index]
     }
@@ -1950,8 +1965,12 @@ public func loadPromptCache(
 }
 
 /// Load a prompt cache and its associated model state from a file.
+///
+/// The arrays are read before this returns, so the file can be overwritten or removed afterwards.
 public func loadPromptCacheSnapshot(url: URL) throws -> PromptCacheSnapshot {
     var (arrays, metadata) = try loadArraysAndMetadata(url: url)
+    // A loaded array reads the file only when it is evaluated.
+    eval(arrays.values)
 
     // Unflatten metadata using tree_unflatten compatible logic
     let unflattenedMetadata = unflattenMetadata(metadata)
@@ -2582,9 +2601,11 @@ public func quantizedScaledDotProductAttention(
         mode: mode
     )
 
-    // Reshape output for GQA
+    // Reshape output for GQA. The head dim follows the values, which MLA-style
+    // caches keep narrower than the keys and queries.
     if nRepeats > 1 {
-        output = output.reshaped([B, nQHeads, L, D])
+        let vHeadDim = output.dim(-1)
+        output = output.reshaped([B, nQHeads, L, vHeadDim])
     }
 
     return output
